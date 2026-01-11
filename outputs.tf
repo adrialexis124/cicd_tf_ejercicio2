@@ -4,7 +4,7 @@ output "public_ip_address" {
   description = "The public IP address of the virtual machine"
 }
 
-# Output the SSH connection command
+# Output the SSH connection commanddsds
 output "ssh_connection_command" {
   value = "ssh -i private_key.pem ${var.admin_username}@${azurerm_public_ip.vm_public_ip.ip_address}"
   description = "Command to connect to the VM via SSH"
