@@ -1,0 +1,146 @@
+name: 'Deploy Ubuntu VM'
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '*.tf'
+      - '.github/workflows/*.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '*.tf'
+      - '.github/workflows/*.yml'
+  workflow_dispatch:
+    inputs:
+      force_recreate:
+        description: 'Force recreate VM with new SSH key (yes/no)'
+        required: false
+        default: 'no'
+
+env:
+  TF_VERSION: '1.5.0'
+
+jobs:
+  terraform:
+    name: 'Terraform VM Deployment'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    # Checkout the repository
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # Install Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    # Login to Azure
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    # Set Azure credentials as environment variables
+    - name: Set Azure Environment Variables
+      run: |
+        echo "ARM_CLIENT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_ENV
+        echo "ARM_CLIENT_SECRET=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_ENV
+        echo "ARM_SUBSCRIPTION_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}" >> $GITHUB_ENV
+        echo "ARM_TENANT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}" >> $GITHUB_ENV
+
+    # Initialize Terraform and handle state intelligently
+    - name: Smart Terraform Init and Apply
+      run: |
+        echo "🚀 Starting intelligent Terraform deployment..."
+        
+        # Initialize Terraform
+        terraform init
+        
+        # Check if force recreate is requested
+        if [ "${{ github.event.inputs.force_recreate }}" = "yes" ]; then
+          echo "🔄 Force recreating VM with new SSH key..."
+          terraform apply -auto-approve -replace=tls_private_key.vm_ssh -replace=azurerm_linux_virtual_machine.vm
+          echo "✅ VM recreated with new SSH key!"
+          exit 0
+        fi
+        
+        # Check if resources already exist in Azure
+        RG_NAME="${{ vars.RESOURCE_GROUP_NAME || 'myTFResourceGroup' }}"
+        
+        if az group show --name "$RG_NAME" &>/dev/null; then
+          echo "⚠️ Resource group $RG_NAME already exists"
+          echo "🔍 Checking for existing VM..."
+          
+          if az vm show --resource-group "$RG_NAME" --name "ubuntu-vm" &>/dev/null; then
+            echo "✅ VM already exists and running"
+            echo "📍 Getting existing VM info..."
+            
+            # Get existing public IP
+            PUBLIC_IP=$(az network public-ip show --resource-group "$RG_NAME" --name "vm-public-ip" --query ipAddress -o tsv 2>/dev/null || echo "Not found")
+            
+            echo "🎯 Existing VM Information:"
+            echo "📍 Public IP: $PUBLIC_IP"
+            echo "👤 Username: azureuser"
+            echo "⚠️  SSH key not available (VM exists from previous deployment)"
+            echo "💡 To get SSH access, run this workflow manually with 'force_recreate: yes'"
+            
+            exit 0
+          else
+            echo "🔄 Resource group exists but VM missing, will recreate..."
+          fi
+        fi
+        
+        # Apply Terraform configuration
+        echo "🏗️ Creating/updating infrastructure..."
+        terraform apply -auto-approve -input=false
+        
+        echo "✅ Deployment completed successfully!"
+
+    # Display connection information with SSH key
+    - name: Display VM Connection Info with SSH Key
+      if: success()
+      run: |
+        echo "🎯 VM Deployment Complete!"
+        echo ""
+        
+        # Try to get outputs from Terraform first
+        if terraform output public_ip_address &>/dev/null; then
+          PUBLIC_IP=$(terraform output -raw public_ip_address)
+          USERNAME=$(terraform output -raw admin_username 2>/dev/null || echo "azureuser")
+          
+          echo "📍 Public IP: $PUBLIC_IP"
+          echo "👤 Username: $USERNAME"
+          echo "🔑 SSH Command: ssh -i private_key.pem $USERNAME@$PUBLIC_IP"
+          echo ""
+          echo "🔐 SSH PRIVATE KEY (save as private_key.pem):"
+          echo "=============================================="
+          terraform output -raw private_key
+          echo "=============================================="
+          echo ""
+          echo "📋 Connection Instructions:"
+          echo "1. Copy the private key above (from -----BEGIN to -----END)"
+          echo "2. Save it as 'private_key.pem' on your local machine"
+          echo "3. Run: chmod 600 private_key.pem"
+          echo "4. Connect: ssh -i private_key.pem $USERNAME@$PUBLIC_IP"
+          
+        else
+          # Fallback to Azure CLI
+          RG_NAME="${{ vars.RESOURCE_GROUP_NAME || 'myTFResourceGroup' }}"
+          PUBLIC_IP=$(az network public-ip show --resource-group "$RG_NAME" --name "vm-public-ip" --query ipAddress -o tsv 2>/dev/null || echo "Not found")
+          USERNAME="azureuser"
+          
+          echo "📍 Public IP: $PUBLIC_IP"
+          echo "👤 Username: $USERNAME"
+          echo "⚠️  SSH key not available from Terraform state"
+          echo "🌐 Use Azure Portal Serial Console for access"
+        fi

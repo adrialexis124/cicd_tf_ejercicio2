@@ -1,0 +1,71 @@
+name: 'Get VM Information'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  vm_info:
+    name: 'VM Information'
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Login to Azure
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    # Get VM information
+    - name: Get VM Details
+      run: |
+        echo "🔍 Checking VM status..."
+        
+        RG_NAME="${{ vars.RESOURCE_GROUP_NAME || 'myTFResourceGroup' }}"
+        VM_NAME="ubuntu-vm"
+        
+        if az group show --name "$RG_NAME" &>/dev/null; then
+          echo "✅ Resource group found: $RG_NAME"
+          
+          if az vm show --resource-group "$RG_NAME" --name "$VM_NAME" &>/dev/null; then
+            echo "✅ VM found: $VM_NAME"
+            
+            # Get VM status
+            VM_STATUS=$(az vm get-instance-view --resource-group "$RG_NAME" --name "$VM_NAME" --query instanceView.statuses[1].displayStatus -o tsv)
+            echo "🔋 VM Status: $VM_STATUS"
+            
+            # Get public IP
+            PUBLIC_IP=$(az network public-ip show --resource-group "$RG_NAME" --name "vm-public-ip" --query ipAddress -o tsv 2>/dev/null || echo "Not assigned")
+            echo "📍 Public IP: $PUBLIC_IP"
+            
+            # Get VM size
+            VM_SIZE=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" --query hardwareProfile.vmSize -o tsv)
+            echo "💻 VM Size: $VM_SIZE"
+            
+            # Get OS info
+            OS_TYPE=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" --query storageProfile.osDisk.osType -o tsv)
+            echo "🐧 OS Type: $OS_TYPE"
+            
+            echo ""
+            echo "🔑 Connection Information:"
+            echo "SSH Command: ssh azureuser@$PUBLIC_IP"
+            echo "Username: azureuser"
+            echo ""
+            
+            if [ "$VM_STATUS" = "VM running" ]; then
+              echo "✅ VM is running and ready for connections"
+              echo ""
+              echo "💡 To get SSH private key:"
+              echo "Run 'Deploy Ubuntu VM' workflow manually with 'force_recreate: yes'"
+            else
+              echo "⚠️ VM is not running. Status: $VM_STATUS"
+              echo "💡 You may need to start the VM from Azure Portal"
+            fi
+            
+          else
+            echo "❌ VM not found: $VM_NAME"
+            echo "💡 Run the 'Deploy Ubuntu VM' workflow to create the VM"
+          fi
+        else
+          echo "❌ Resource group not found: $RG_NAME"
+          echo "💡 Run the 'Deploy Ubuntu VM' workflow to create the infrastructure"
+        fi

@@ -1,0 +1,132 @@
+name: 'Destroy Ubuntu VM'
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm VM destruction'
+        required: true
+        default: ''
+
+env:
+  TF_VERSION: '1.5.0'
+
+jobs:
+  destroy:
+    name: 'Terraform VM Destroy'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    # Safety check
+    - name: Confirm Destroy
+      run: |
+        if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
+          echo "❌ Destruction cancelled. You must type 'DESTROY' to confirm."
+          exit 1
+        fi
+        echo "✅ VM destruction confirmed. Proceeding..."
+
+    # Checkout the repository
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # Install Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    # Login to Azure
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    # Set Azure credentials as environment variables
+    - name: Set Azure Environment Variables
+      run: |
+        echo "ARM_CLIENT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_ENV
+        echo "ARM_CLIENT_SECRET=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_ENV
+        echo "ARM_SUBSCRIPTION_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}" >> $GITHUB_ENV
+        echo "ARM_TENANT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}" >> $GITHUB_ENV
+
+    # Smart destroy that works regardless of Terraform state
+    - name: Smart Terraform Destroy
+      run: |
+        echo "🔥 Starting intelligent VM destruction..."
+        
+        # Initialize Terraform
+        terraform init
+        
+        # Try Terraform destroy first
+        echo "🔄 Attempting Terraform destroy..."
+        if terraform destroy -auto-approve -input=false; then
+          echo "✅ Terraform destroy completed successfully"
+        else
+          echo "⚠️ Terraform destroy failed or found no resources"
+          echo "🔄 Falling back to Azure CLI cleanup..."
+          
+          # Fallback to Azure CLI
+          RG_NAME="${{ vars.RESOURCE_GROUP_NAME || 'myTFResourceGroup' }}"
+          
+          if az group show --name "$RG_NAME" &>/dev/null; then
+            echo "🔥 Force deleting resource group: $RG_NAME"
+            az group delete --name "$RG_NAME" --yes --no-wait
+            
+            echo "⏳ Waiting for deletion to complete..."
+            # Wait up to 5 minutes for deletion
+            for i in {1..10}; do
+              if ! az group show --name "$RG_NAME" &>/dev/null; then
+                echo "✅ Resource group deleted successfully"
+                break
+              fi
+              echo "Waiting for deletion... ($i/10)"
+              sleep 30
+            done
+          else
+            echo "✅ Resource group not found (already deleted)"
+          fi
+        fi
+
+    # Verify destruction and cleanup NetworkWatcher
+    - name: Verify Destruction and Cleanup
+      run: |
+        echo "🔍 Verifying all resources are deleted..."
+        
+        # Check if resource group still exists
+        RG_NAME="${{ vars.RESOURCE_GROUP_NAME || 'myTFResourceGroup' }}"
+        
+        if az group show --name "$RG_NAME" &>/dev/null; then
+          echo "⚠️ Resource group $RG_NAME still exists"
+          echo "🔥 Force deleting with Azure CLI..."
+          az group delete --name "$RG_NAME" --yes --no-wait
+        else
+          echo "✅ Main resource group deleted successfully"
+        fi
+        
+        # Also cleanup NetworkWatcherRG if it exists and is empty
+        echo "🔍 Checking NetworkWatcherRG..."
+        if az group show --name "NetworkWatcherRG" &>/dev/null; then
+          echo "📋 NetworkWatcherRG found, checking if it's safe to delete..."
+          
+          # Check if NetworkWatcherRG has any resources other than Network Watcher
+          RESOURCES=$(az resource list --resource-group "NetworkWatcherRG" --query "length([?type!='Microsoft.Network/networkWatchers'])" -o tsv)
+          
+          if [ "$RESOURCES" = "0" ]; then
+            echo "🔥 NetworkWatcherRG only contains Network Watcher, safe to delete..."
+            az group delete --name "NetworkWatcherRG" --yes --no-wait
+            echo "✅ NetworkWatcherRG deletion initiated"
+          else
+            echo "⚠️ NetworkWatcherRG contains other resources, keeping it"
+          fi
+        else
+          echo "✅ NetworkWatcherRG not found"
+        fi
+        
+        echo "🎯 VM destruction completed!"
+        echo "💰 No more costs will be incurred"
